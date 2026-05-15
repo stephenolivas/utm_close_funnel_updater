@@ -215,11 +215,21 @@ def append_run_log(sheet, stats: dict) -> None:
     """Append one row per run with summary stats."""
     headers = [
         "timestamp", "duration_sec", "dry_run", "source_rows",
-        "contacts_scanned", "leads_processed", "leads_updated",
-        "leads_skipped_already_set", "conflicts", "missing_campaigns",
+        "contacts_scanned", "contacts_false_positive",
+        "leads_processed", "leads_updated",
+        "leads_skipped_already_set", "leads_raced",
+        "conflicts", "missing_campaigns",
         "errors", "notes",
     ]
     ws = _get_or_create_worksheet(sheet, config.RUN_LOG_TAB, headers)
+    # Schema may have grown since the worksheet was first created. If so,
+    # refresh the header row so new columns get labeled in the sheet.
+    try:
+        current_header = ws.row_values(1)
+    except Exception:
+        current_header = []
+    if current_header != headers:
+        ws.update(range_name="A1", values=[headers])
     row = [[stats.get(h, "") for h in headers]]
     ws.append_rows(row, value_input_option="USER_ENTERED")
     log.info("Appended run log entry to '%s'", config.RUN_LOG_TAB)
