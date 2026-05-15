@@ -76,14 +76,22 @@ class CloseClient:
     # Contact search (paginated, generator)
     # -------------------------------------------------------------------------
     def search_contacts(self, query: str, fields: list[str]) -> Iterator[dict]:
-        """Yield every contact matching `query`, paging in batches of 100."""
+        """Yield every contact matching `query`, paging in batches of 100.
+
+        Results are ordered by date_updated DESCENDING (most recent first).
+        This lets consumers early-terminate when records become older than a
+        cutoff — important because Close caps skip-based pagination at ~10k
+        records, and the /contact/ endpoint silently ignores date filters
+        in the text query string.
+        """
         skip = 0
         while True:
             data = self._request("GET", "/contact/", params={
-                "query":   query,
-                "_skip":   skip,
-                "_limit":  100,
-                "_fields": ",".join(fields),
+                "query":     query,
+                "_skip":     skip,
+                "_limit":    100,
+                "_fields":   ",".join(fields),
+                "_order_by": "-date_updated",
             })
             batch = data.get("data", [])
             if not batch:
