@@ -101,9 +101,20 @@ def main() -> int:
         f"custom.{utm_source_field}",
         f"custom.{utm_campaign_field}",
     ]
-    query = f'custom.{utm_source_field}:"youtube"'
 
-    # Dedupe contacts by lead_id, keep only recent ones.
+    # Push the date filter into the query itself. Close caps skip-based
+    # pagination at ~10k records; without this filter we'd exceed that on
+    # any account with a meaningful YouTube contact volume.
+    # Syntax confirmed against Close's text query language docs:
+    #   https://help.close.com/docs/searching-guide-single-queries
+    query = (
+        f'custom.{utm_source_field}:"youtube" '
+        f'date_updated > "{config.LOOKBACK_DAYS} days ago"'
+    )
+    log.info("Close query: %s", query)
+
+    # Dedupe contacts by lead_id. We keep the Python-side recency check as a
+    # safety net in case the query-side date filter doesn't behave as expected.
     leads_to_process: dict[str, list[dict]] = defaultdict(list)
     try:
         for c in cli.search_contacts(query, contact_fields):
