@@ -39,7 +39,8 @@ REQUIRED_HEADERS = ["utm_source", "utm_medium", "utm_campaign", "utm_content", F
 # Behavior
 # -----------------------------------------------------------------------------
 # Only process contacts updated within this many days.
-LOOKBACK_DAYS = 30
+# 7 is sufficient given typical booking windows of 2–5 days.
+LOOKBACK_DAYS = 7
 
 # Abort the run if the source tab's row count drops by more than this fraction
 # compared to the most recent successful run (catches broken IMPORTRANGE).
