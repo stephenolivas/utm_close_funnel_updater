@@ -1,0 +1,43 @@
+name: Close Funnel Sync — YouTube
+
+on:
+  schedule:
+    # Hourly, on the hour, UTC.
+    - cron: '0 * * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (no Close writes; reports still written)'
+        type: boolean
+        default: false
+
+# Prevent overlapping runs.
+concurrency:
+  group: close-funnel-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CLOSE_API_KEY:               ${{ secrets.CLOSE_API_KEY }}
+      GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+      MASTER_SHEET_ID:             ${{ secrets.MASTER_SHEET_ID }}
+      DRY_RUN:                     ${{ inputs.dry_run || 'false' }}
+      PYTHONUNBUFFERED:            '1'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run sync
+        run: python3 -u -m src.main
