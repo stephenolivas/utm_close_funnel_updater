@@ -31,6 +31,7 @@ def main() -> int:
         "leads_processed":           0,
         "leads_updated":             0,
         "leads_skipped_already_set": 0,
+        "leads_raced":               0,   # Zap (or other integration) populated the field between our two reads
         "conflicts":                 0,
         "missing_campaigns":         0,
         "errors":                    0,
@@ -189,6 +190,7 @@ def main() -> int:
             continue
 
         current_funnel = str(lead.get(f"custom.{funnel_name_field}") or "").strip()
+        raw_funnel_value = lead.get(f"custom.{funnel_name_field}")
 
         # --- Check A: write decision based on utm_source ---
         if not current_funnel:
@@ -199,15 +201,69 @@ def main() -> int:
             action = "conflict"
 
         if action == "write":
+            # Defensive log: capture exactly what Close returned at decision
+            # time. The funnel field is also written by a flaky Zap, so we
+            # want evidence of what we saw if the UI later shows a value.
+            log.info(
+                "Write decision for %s: raw_funnel=%r (url=%s)",
+                lead_id, raw_funnel_value, lead_url,
+            )
+
             if config.DRY_RUN:
                 log.info("[DRY] Would update lead %s → Funnel Name = '%s'", lead_id, target_funnel)
                 stats["leads_updated"] += 1
             else:
+                # Race-protection: re-fetch immediately before write. If the
+                # Zap (or anything else) populated the field between our two
+                # reads, don't redundantly overwrite.
+                try:
+                    lead_recheck = cli.get_lead(
+                        lead_id, ["id", f"custom.{funnel_name_field}"],
+                    )
+                except Exception as e:
+                    log.warning("Failed to re-fetch lead %s before write: %s", lead_id, e)
+                    stats["errors"] += 1
+                    continue
+
+                recheck_raw = lead_recheck.get(f"custom.{funnel_name_field}")
+                recheck_funnel = str(recheck_raw or "").strip()
+
+                if recheck_funnel == target_funnel:
+                    log.info(
+                        "Race detected on lead %s — funnel populated to '%s' between reads "
+                        "(raw=%r); skipping write (url=%s)",
+                        lead_id, recheck_funnel, recheck_raw, lead_url,
+                    )
+                    stats["leads_raced"] += 1
+                    continue
+
+                if recheck_funnel and recheck_funnel != target_funnel:
+                    log.info(
+                        "Race-to-conflict on lead %s — funnel changed to '%s' between reads "
+                        "(raw=%r); recording as conflict (url=%s)",
+                        lead_id, recheck_funnel, recheck_raw, lead_url,
+                    )
+                    stats["conflicts"] += 1
+                    c = contacts[0]
+                    conflicts.append({
+                        "lead_id":               lead_id,
+                        "lead_url":              lead_url,
+                        "current_funnel_name":   recheck_funnel,
+                        "attempted_funnel_name": target_funnel,
+                        "contact_id":            c.get("id", ""),
+                        "utm_source":            c.get(f"custom.{utm_source_field}", ""),
+                        "utm_campaign":          c.get(f"custom.{utm_campaign_field}", ""),
+                    })
+                    continue
+
                 try:
                     cli.update_lead(lead_id, {
                         f"custom.{funnel_name_field}": target_funnel,
                     })
-                    log.info("Updated lead %s → '%s'", lead_id, target_funnel)
+                    log.info(
+                        "Updated lead %s → '%s' (was raw=%r, url=%s)",
+                        lead_id, target_funnel, recheck_raw, lead_url,
+                    )
                     stats["leads_updated"] += 1
                 except Exception as e:
                     log.warning("Failed to update lead %s: %s", lead_id, e)
@@ -258,13 +314,14 @@ def main() -> int:
 
     log.info(
         "=== Done in %ds | scanned=%d false_pos=%d processed=%d updated=%d "
-        "already_set=%d conflicts=%d missing=%d errors=%d ===",
+        "already_set=%d raced=%d conflicts=%d missing=%d errors=%d ===",
         stats["duration_sec"],
         stats["contacts_scanned"],
         stats["contacts_false_positive"],
         stats["leads_processed"],
         stats["leads_updated"],
         stats["leads_skipped_already_set"],
+        stats["leads_raced"],
         stats["conflicts"],
         stats["missing_campaigns"],
         stats["errors"],
