@@ -28,8 +28,12 @@ MISSING_TAB   = "_Missing Funnels"
 CONFLICTS_TAB = "_Conflicts"
 RUN_LOG_TAB   = "_Run Log"
 
+# The column header in the source tab that carries the funnel name to write
+# to Close. Change this in one place if Marketing renames the column.
+FUNNEL_NAME_HEADER = "Funnel Name for Close"
+
 # Required column headers in the source tab. Script aborts if any are missing.
-REQUIRED_HEADERS = ["utm_source", "utm_medium", "utm_campaign", "utm_content", "Funnel Name"]
+REQUIRED_HEADERS = ["utm_source", "utm_medium", "utm_campaign", "utm_content", FUNNEL_NAME_HEADER]
 
 # -----------------------------------------------------------------------------
 # Behavior
