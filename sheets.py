@@ -86,7 +86,7 @@ def read_source_tab(sheet) -> tuple[dict, set, int]:
     known_campaigns: set[str] = set()
     for row in rows:
         utm_source   = str(row.get("utm_source", "")).strip().lower()
-        funnel       = str(row.get("Funnel Name", "")).strip()
+        funnel       = str(row.get(config.FUNNEL_NAME_HEADER, "")).strip()
         utm_campaign = str(row.get("utm_campaign", "")).strip()
         if utm_source and funnel:
             source_map[utm_source] = funnel
