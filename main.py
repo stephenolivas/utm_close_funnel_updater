@@ -27,6 +27,7 @@ def main() -> int:
         "duration_sec":              0,
         "source_rows":               0,
         "contacts_scanned":          0,
+        "contacts_false_positive":   0,   # Close returned them, but utm_source wasn't actually a match
         "leads_processed":           0,
         "leads_updated":             0,
         "leads_skipped_already_set": 0,
@@ -109,8 +110,11 @@ def main() -> int:
     query = f'custom.{utm_source_field}:"youtube"'
     log.info("Close query: %s (sorted by -date_updated)", query)
 
-    # Dedupe contacts by lead_id.
+    # Dedupe contacts by lead_id. Track false positives so we can see how
+    # noisy Close's search is.
     leads_to_process: dict[str, list[dict]] = defaultdict(list)
+    sample_false_positives: list[tuple[str, str]] = []   # (contact_id, actual_utm_source)
+
     try:
         for c in cli.search_contacts(query, contact_fields):
             stats["contacts_scanned"] += 1
@@ -123,6 +127,19 @@ def main() -> int:
                     c.get("id"), date_for_filter, stats["contacts_scanned"],
                 )
                 break
+
+            # --- SAFETY CHECK ---
+            # Close's search returns false positives — contacts whose
+            # utm_source field is empty, stale, or unrelated. Before
+            # queueing the lead for update, confirm this contact's
+            # utm_source actually matches our source map.
+            actual_utm_source = matcher.normalize(c.get(f"custom.{utm_source_field}"))
+            if actual_utm_source not in source_map:
+                stats["contacts_false_positive"] += 1
+                if len(sample_false_positives) < 5:
+                    sample_false_positives.append((c.get("id", ""), actual_utm_source or "(empty)"))
+                continue
+
             lead_id = c.get("lead_id")
             if not lead_id:
                 continue
@@ -135,9 +152,21 @@ def main() -> int:
         sheets.append_run_log(sheet, stats)
         return 1
 
+    if stats["contacts_false_positive"] > 0:
+        log.warning(
+            "Close search returned %d false positives "
+            "(contacts whose utm_source did not actually match). "
+            "Sample: %s",
+            stats["contacts_false_positive"], sample_false_positives,
+        )
+
     log.info(
-        "Scanned %d contacts; %d unique leads with activity in last %d days",
-        stats["contacts_scanned"], len(leads_to_process), config.LOOKBACK_DAYS,
+        "Scanned %d contacts; %d verified as utm_source match; "
+        "%d unique leads with activity in last %d days",
+        stats["contacts_scanned"],
+        stats["contacts_scanned"] - stats["contacts_false_positive"],
+        len(leads_to_process),
+        config.LOOKBACK_DAYS,
     )
 
     # -------------------------------------------------------------------------
@@ -228,10 +257,11 @@ def main() -> int:
     sheets.append_run_log(sheet, stats)
 
     log.info(
-        "=== Done in %ds | scanned=%d processed=%d updated=%d already_set=%d "
-        "conflicts=%d missing=%d errors=%d ===",
+        "=== Done in %ds | scanned=%d false_pos=%d processed=%d updated=%d "
+        "already_set=%d conflicts=%d missing=%d errors=%d ===",
         stats["duration_sec"],
         stats["contacts_scanned"],
+        stats["contacts_false_positive"],
         stats["leads_processed"],
         stats["leads_updated"],
         stats["leads_skipped_already_set"],
