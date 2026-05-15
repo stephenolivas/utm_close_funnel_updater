@@ -6,7 +6,10 @@ import time
 from collections import defaultdict
 from datetime import datetime, timezone
 
-from . import close, config, matcher, sheets
+import close
+import config
+import matcher
+import sheets
 
 logging.basicConfig(
     level=logging.INFO,
