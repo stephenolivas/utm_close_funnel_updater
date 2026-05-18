@@ -92,7 +92,9 @@ def main() -> int:
     cli = close.CloseClient(api_key)
 
     utm_source_field   = config.CLOSE_FIELDS["contact"]["utm_source"]
+    utm_medium_field   = config.CLOSE_FIELDS["contact"]["utm_medium"]
     utm_campaign_field = config.CLOSE_FIELDS["contact"]["utm_campaign"]
+    utm_content_field  = config.CLOSE_FIELDS["contact"]["utm_content"]
     funnel_name_field  = config.CLOSE_FIELDS["lead"]["funnel_name"]
 
     contact_fields = [
@@ -101,7 +103,9 @@ def main() -> int:
         "date_created",
         "date_updated",
         f"custom.{utm_source_field}",
+        f"custom.{utm_medium_field}",
         f"custom.{utm_campaign_field}",
+        f"custom.{utm_content_field}",
     ]
 
     # Note: the /contact/ endpoint silently ignores date filters in the query
@@ -177,6 +181,20 @@ def main() -> int:
     missing_funnels: dict[str, dict] = {}
     conflicts: list[dict] = []
 
+    def _format_contacts(cs: list[dict]) -> str:
+        """Build a human-readable block listing the contacts that triggered this lead."""
+        lines = []
+        for c in cs:
+            lines.append(
+                f"    {c.get('id', '?')} | "
+                f"utm_source={c.get(f'custom.{utm_source_field}', '') or '(empty)'!r} | "
+                f"utm_medium={c.get(f'custom.{utm_medium_field}', '') or '(empty)'!r} | "
+                f"utm_campaign={c.get(f'custom.{utm_campaign_field}', '') or '(empty)'!r} | "
+                f"utm_content={c.get(f'custom.{utm_content_field}', '') or '(empty)'!r} | "
+                f"updated={c.get('date_updated', '?')}"
+            )
+        return "\n".join(lines)
+
     for lead_id, contacts in leads_to_process.items():
         stats["leads_processed"] += 1
         lead_url = f"https://app.close.com/lead/{lead_id}/"
@@ -189,6 +207,7 @@ def main() -> int:
             stats["errors"] += 1
             continue
 
+        display_name = lead.get("display_name") or "(no name)"
         current_funnel = str(lead.get(f"custom.{funnel_name_field}") or "").strip()
         raw_funnel_value = lead.get(f"custom.{funnel_name_field}")
 
@@ -201,16 +220,22 @@ def main() -> int:
             action = "conflict"
 
         if action == "write":
-            # Defensive log: capture exactly what Close returned at decision
-            # time. The funnel field is also written by a flaky Zap, so we
-            # want evidence of what we saw if the UI later shows a value.
+            # Verbose decision log: full context so each "would update" can be
+            # spot-checked without re-querying Close. The funnel field is also
+            # written by a flaky Zap; this evidence proves what we saw at the
+            # moment of decision in case the UI shows a value later.
+            tag = "[DRY] Would update" if config.DRY_RUN else "Updating"
             log.info(
-                "Write decision for %s: raw_funnel=%r (url=%s)",
-                lead_id, raw_funnel_value, lead_url,
+                "%s lead %s '%s'\n"
+                "  url:            %s\n"
+                "  current funnel: raw=%r (treated as empty)\n"
+                "  target funnel:  %r\n"
+                "  triggering contacts (%d):\n%s",
+                tag, lead_id, display_name, lead_url, raw_funnel_value,
+                target_funnel, len(contacts), _format_contacts(contacts),
             )
 
             if config.DRY_RUN:
-                log.info("[DRY] Would update lead %s → Funnel Name = '%s'", lead_id, target_funnel)
                 stats["leads_updated"] += 1
             else:
                 # Race-protection: re-fetch immediately before write. If the
@@ -261,8 +286,8 @@ def main() -> int:
                         f"custom.{funnel_name_field}": target_funnel,
                     })
                     log.info(
-                        "Updated lead %s → '%s' (was raw=%r, url=%s)",
-                        lead_id, target_funnel, recheck_raw, lead_url,
+                        "  → wrote: lead %s funnel set to '%s' (was raw=%r)",
+                        lead_id, target_funnel, recheck_raw,
                     )
                     stats["leads_updated"] += 1
                 except Exception as e:
@@ -270,6 +295,12 @@ def main() -> int:
                     stats["errors"] += 1
         elif action == "skip_already_set":
             stats["leads_skipped_already_set"] += 1
+            # One-line audit so the user can spot-check every YouTube lead in
+            # the window, not just the ones that need writes.
+            log.info(
+                "Already set: lead %s '%s' — funnel=%r (url=%s)",
+                lead_id, display_name, current_funnel, lead_url,
+            )
         elif action == "conflict":
             stats["conflicts"] += 1
             c = contacts[0]
@@ -283,8 +314,13 @@ def main() -> int:
                 "utm_campaign":          c.get(f"custom.{utm_campaign_field}", ""),
             })
             log.info(
-                "Conflict on lead %s: current='%s', attempted='%s'",
-                lead_id, current_funnel, target_funnel,
+                "Conflict on lead %s '%s'\n"
+                "  url:             %s\n"
+                "  current funnel:  %r  ← NOT overwriting\n"
+                "  attempted funnel: %r\n"
+                "  triggering contacts (%d):\n%s",
+                lead_id, display_name, lead_url, current_funnel,
+                target_funnel, len(contacts), _format_contacts(contacts),
             )
 
         # --- Check B: campaign monitoring (independent of write) ---
