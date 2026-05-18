@@ -3,6 +3,7 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import gspread
 from google.oauth2.service_account import Credentials
@@ -12,6 +13,12 @@ import config
 log = logging.getLogger(__name__)
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+LOCAL_TZ = ZoneInfo(config.TIMEZONE)
+
+
+def _local_now_iso() -> str:
+    """Current time in the configured local timezone, ISO 8601 with offset."""
+    return datetime.now(LOCAL_TZ).isoformat(timespec="seconds")
 
 
 class IntegrityError(Exception):
@@ -161,7 +168,7 @@ def update_missing_funnels(sheet, missing: dict) -> None:
 
     existing = ws.get_all_records()
     by_campaign = {r["campaign"]: r for r in existing if r.get("campaign")}
-    now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    now_iso = _local_now_iso()
 
     updated_rows = []
     for campaign, data in missing.items():
@@ -205,7 +212,7 @@ def append_conflicts(sheet, conflicts: list[dict]) -> None:
         "attempted_funnel_name", "contact_id", "utm_source", "utm_campaign",
     ]
     ws = _get_or_create_worksheet(sheet, config.CONFLICTS_TAB, headers)
-    now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    now_iso = _local_now_iso()
     body = [[now_iso] + [c.get(h, "") for h in headers[1:]] for c in conflicts]
     ws.append_rows(body, value_input_option="USER_ENTERED")
     log.info("Appended %d rows to '%s'", len(body), config.CONFLICTS_TAB)
