@@ -49,5 +49,10 @@ ROW_DROP_ABORT_THRESHOLD = 0.30
 # DRY_RUN=true skips all Close writes; reads/reports still happen.
 DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
 
+# Timezone used for all timestamps written to reports and the Python log
+# output. Defaults to Pacific so it matches the GitHub Actions UI for the
+# Eugene-based author. Override via REPORT_TIMEZONE env var if needed.
+TIMEZONE = os.environ.get("REPORT_TIMEZONE", "America/Los_Angeles")
+
 # Cell values that indicate the sheet didn't load properly.
 INTEGRITY_FAIL_VALUES = {"#REF!", "#ERROR!", "#N/A", "Loading...", "#NAME?", "#VALUE!"}
