@@ -5,24 +5,43 @@ import sys
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import close
 import config
 import matcher
 import sheets
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    stream=sys.stdout,
-)
+LOCAL_TZ = ZoneInfo(config.TIMEZONE)
+
+
+def _local_now_iso() -> str:
+    """Current time in the configured local timezone, ISO 8601 with offset."""
+    return datetime.now(LOCAL_TZ).isoformat(timespec="seconds")
+
+
+# Python logging: timestamps in local timezone too, so log lines line up
+# with both the sheet timestamps and the GitHub Actions UI.
+class _LocalFormatter(logging.Formatter):
+    def formatTime(self, record, datefmt=None):  # type: ignore[override]
+        dt = datetime.fromtimestamp(record.created, LOCAL_TZ)
+        if datefmt:
+            return dt.strftime(datefmt)
+        return dt.isoformat(timespec="seconds")
+
+_handler = logging.StreamHandler(stream=sys.stdout)
+_handler.setFormatter(_LocalFormatter(
+    fmt="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S %Z",
+))
+logging.basicConfig(level=logging.INFO, handlers=[_handler])
 log = logging.getLogger("sync")
 
 
 def main() -> int:
     start = time.time()
     stats = {
-        "timestamp":                 datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "timestamp":                 _local_now_iso(),
         "dry_run":                   config.DRY_RUN,
         "duration_sec":              0,
         "source_rows":               0,
