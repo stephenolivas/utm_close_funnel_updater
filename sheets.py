@@ -226,7 +226,7 @@ def append_run_log(sheet, stats: dict) -> None:
         "leads_processed", "leads_updated",
         "leads_skipped_already_set", "leads_raced",
         "conflicts", "missing_campaigns",
-        "errors", "notes",
+        "errors", "notes", "per_funnel",
     ]
     ws = _get_or_create_worksheet(sheet, config.RUN_LOG_TAB, headers)
     # Schema may have grown since the worksheet was first created. If so,
