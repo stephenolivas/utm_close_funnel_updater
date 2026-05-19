@@ -46,30 +46,51 @@ def open_sheet() -> gspread.Spreadsheet:
 # -----------------------------------------------------------------------------
 # Source tab read + integrity checks
 # -----------------------------------------------------------------------------
-def read_source_tab(sheet) -> tuple[dict, set, int]:
+def read_source_tab(sheet, tab_name: str) -> tuple[dict, set, int]:
     """
-    Read the source tab and return (source_map, known_campaigns, row_count).
+    Read one source tab and return (source_map, known_campaigns, row_count).
 
-    source_map: {utm_source_lower: funnel_name}
-    known_campaigns: set of non-empty utm_campaign values
-    row_count: number of non-empty data rows (used for the baseline check)
+      source_map: {utm_source_lower: funnel_name}
+      known_campaigns: set of non-empty utm_campaign values FROM THIS TAB
+      row_count: number of non-empty data rows
 
-    Raises IntegrityError if the tab looks broken.
+    Raises IntegrityError on error sentinels. Does NOT do the row-count
+    baseline check — call check_total_row_count_baseline() on the sum
+    after reading every tab.
     """
     try:
-        ws = sheet.worksheet(config.SOURCE_TAB)
+        ws = sheet.worksheet(tab_name)
     except gspread.WorksheetNotFound:
-        raise RuntimeError(f"Tab '{config.SOURCE_TAB}' not found in master sheet")
+        raise RuntimeError(f"Tab '{tab_name}' not found in master sheet")
 
     rows = ws.get_all_records()
 
-    # 1. Header validation
+    # 1. Header validation. Either 'Funnel Name' or the old 'Funnel Name for
+    # Close' header is acceptable so we don't break during the rename window.
+    funnel_header = None
     if rows:
         present = set(rows[0].keys())
         missing = [h for h in config.REQUIRED_HEADERS if h not in present]
         if missing:
             raise RuntimeError(
-                f"Tab '{config.SOURCE_TAB}' missing required headers: {missing}. "
+                f"Tab '{tab_name}' missing required headers: {missing}. "
+                f"Found: {sorted(present)}"
+            )
+        if config.FUNNEL_NAME_HEADER in present:
+            funnel_header = config.FUNNEL_NAME_HEADER
+        elif config.FUNNEL_NAME_HEADER_FALLBACK in present:
+            funnel_header = config.FUNNEL_NAME_HEADER_FALLBACK
+            log.info(
+                "Tab '%s' uses legacy funnel column '%s' — works fine, but "
+                "consider renaming to '%s' for consistency",
+                tab_name, config.FUNNEL_NAME_HEADER_FALLBACK,
+                config.FUNNEL_NAME_HEADER,
+            )
+        else:
+            raise RuntimeError(
+                f"Tab '{tab_name}' missing funnel-name column. Expected "
+                f"'{config.FUNNEL_NAME_HEADER}' (or legacy "
+                f"'{config.FUNNEL_NAME_HEADER_FALLBACK}'). "
                 f"Found: {sorted(present)}"
             )
 
@@ -78,22 +99,19 @@ def read_source_tab(sheet) -> tuple[dict, set, int]:
         for k, v in row.items():
             if isinstance(v, str) and v.strip() in config.INTEGRITY_FAIL_VALUES:
                 raise IntegrityError(
-                    f"Tab '{config.SOURCE_TAB}' row {i} column '{k}' contains "
+                    f"Tab '{tab_name}' row {i} column '{k}' contains "
                     f"error sentinel '{v.strip()}' — aborting run"
                 )
 
     # 3. Count non-empty rows
     row_count = sum(1 for r in rows if any(str(v).strip() for v in r.values()))
 
-    # 4. Row-count baseline check (catches a silently broken IMPORTRANGE)
-    _check_row_count_baseline(sheet, row_count)
-
-    # 5. Build outputs
+    # 4. Build outputs
     source_map: dict[str, str] = {}
     known_campaigns: set[str] = set()
     for row in rows:
         utm_source   = str(row.get("utm_source", "")).strip().lower()
-        funnel       = str(row.get(config.FUNNEL_NAME_HEADER, "")).strip()
+        funnel       = str(row.get(funnel_header, "")).strip() if funnel_header else ""
         utm_campaign = str(row.get("utm_campaign", "")).strip()
         if utm_source and funnel:
             source_map[utm_source] = funnel
@@ -102,13 +120,14 @@ def read_source_tab(sheet) -> tuple[dict, set, int]:
 
     log.info(
         "Loaded %d rows from '%s': %d source mappings, %d known campaigns",
-        row_count, config.SOURCE_TAB, len(source_map), len(known_campaigns),
+        row_count, tab_name, len(source_map), len(known_campaigns),
     )
     return source_map, known_campaigns, row_count
 
 
-def _check_row_count_baseline(sheet, current_count: int) -> None:
-    """Abort if source row count dropped more than the configured threshold."""
+def check_total_row_count_baseline(sheet, current_total: int) -> None:
+    """Abort if the SUM of source rows across all tabs dropped more than
+    the configured threshold compared to the last successful run."""
     try:
         ws = sheet.worksheet(config.RUN_LOG_TAB)
     except gspread.WorksheetNotFound:
@@ -132,11 +151,12 @@ def _check_row_count_baseline(sheet, current_count: int) -> None:
         return
 
     threshold = last * (1 - config.ROW_DROP_ABORT_THRESHOLD)
-    if last > 0 and current_count < threshold:
+    if last > 0 and current_total < threshold:
         raise IntegrityError(
-            f"Source tab row count dropped from {last} to {current_count} "
-            f"(>{int(config.ROW_DROP_ABORT_THRESHOLD * 100)}% drop) — aborting run. "
-            f"Possible broken IMPORTRANGE or sharing revoked."
+            f"Total source row count across all tabs dropped from {last} to "
+            f"{current_total} (>{int(config.ROW_DROP_ABORT_THRESHOLD * 100)}% "
+            f"drop) — aborting run. Possible broken IMPORTRANGE or sharing "
+            f"revoked on one of the source tabs."
         )
 
 
