@@ -42,20 +42,17 @@ def _classify_source(value, source_map: dict[str, str]) -> str | None:
 
 
 def _format_per_funnel(by_funnel: dict[str, dict[str, int]]) -> str:
-    """Render per-funnel stats as a multi-line string for the run log cell.
-    Sorted by funnel name for stable ordering across runs. Funnels with all
-    zeros are still shown so a glance reveals quiet channels too."""
+    """Render per-funnel UPDATE counts as a multi-line string for the run log
+    cell. Only funnels with updated > 0 are listed (this matches the rule
+    that we only write a run-log row when updates happened). Sorted by
+    funnel name for stable ordering across runs."""
     if not by_funnel:
         return ""
     lines = []
     for funnel in sorted(by_funnel):
-        s = by_funnel[funnel]
-        lines.append(
-            f"{funnel}: upd={s.get('updated', 0)} "
-            f"set={s.get('already_set', 0)} "
-            f"conf={s.get('conflicts', 0)} "
-            f"race={s.get('raced', 0)}"
-        )
+        n = by_funnel[funnel].get("updated", 0)
+        if n > 0:
+            lines.append(f"{funnel}: {n}")
     return "\n".join(lines)
 
 
@@ -106,12 +103,35 @@ def main() -> int:
         })[key] += 1
 
     # -------------------------------------------------------------------------
-    # 1. Open sheet and read source tab (with integrity checks)
+    # 1. Open sheet and read every source tab (with integrity checks)
     # -------------------------------------------------------------------------
     log.info("=== Step 1: Reading master sheet ===")
     sheet = sheets.open_sheet()
+    sheet_source_map: dict[str, str] = {}                 # utm_source → funnel
+    known_campaigns_by_funnel: dict[str, set[str]] = {}   # funnel → set of campaigns
+    total_source_rows = 0
+
     try:
-        source_map, known_campaigns, source_rows = sheets.read_source_tab(sheet)
+        for tab_name in config.SOURCE_TABS:
+            sm, kc, rows = sheets.read_source_tab(sheet, tab_name)
+            total_source_rows += rows
+            # Merge: later tabs override earlier on key collision (shouldn't
+            # happen in practice — each tab owns a distinct utm_source).
+            for src, fn in sm.items():
+                if src in sheet_source_map and sheet_source_map[src] != fn:
+                    log.warning(
+                        "Tab '%s' overrides utm_source=%r: '%s' → '%s'",
+                        tab_name, src, sheet_source_map[src], fn,
+                    )
+                sheet_source_map[src] = fn
+            # Attribute campaigns to the funnel that owns this tab. A tab
+            # with a single funnel column value (the normal case) puts all
+            # its campaigns under that funnel.
+            for fn in set(sm.values()):
+                known_campaigns_by_funnel.setdefault(fn, set()).update(kc)
+
+        # Row-count baseline runs against the SUM of all tabs.
+        sheets.check_total_row_count_baseline(sheet, total_source_rows)
     except sheets.IntegrityError as e:
         log.error("Integrity check failed: %s", e)
         stats["errors"] = 1
@@ -120,7 +140,7 @@ def main() -> int:
         sheets.append_run_log(sheet, stats)
         return 1
     except Exception as e:
-        log.exception("Unexpected error reading source tab")
+        log.exception("Unexpected error reading source tabs")
         stats["errors"] = 1
         stats["notes"] = f"Read failed: {e}"
         stats["duration_sec"] = int(time.time() - start)
@@ -130,8 +150,7 @@ def main() -> int:
             pass
         return 1
 
-    stats["source_rows"] = source_rows
-    sheet_source_map = source_map  # what the sheet returned (currently just YouTube)
+    stats["source_rows"] = total_source_rows
     sheet_driven_sources = set(sheet_source_map.keys())
 
     # Combined source map = sheet entries + simple config entries.
@@ -431,16 +450,21 @@ def main() -> int:
             )
 
         # --- Check B: campaign monitoring (only for sheet-driven sources) ---
-        # Simple config-driven channels (Instagram, X, LinkedIn) have no
+        # Simple config-driven channels (Instagram, X, Linkedin) have no
         # known-campaigns list, so we don't track missing campaigns for them.
+        # Each funnel checks against its OWN tab's campaign list — so a
+        # campaign known to the Webinar tab doesn't accidentally "satisfy"
+        # a YouTube contact.
         for c in contacts:
-            actual_src = matcher.normalize(c.get(f"custom.{utm_source_field}"))
-            if actual_src not in sheet_driven_sources:
-                continue
+            funnel = c["_funnel"]
+            if funnel not in known_campaigns_by_funnel:
+                continue  # not sheet-driven
             campaign = str(c.get(f"custom.{utm_campaign_field}") or "").strip()
-            if campaign and campaign in known_campaigns:
+            if campaign and campaign in known_campaigns_by_funnel[funnel]:
                 continue
-            key = campaign or "(blank)"
+            # Prefix the key with the funnel so different funnels' missing
+            # campaigns don't collide and the sheet entry is self-describing.
+            key = f"[{funnel}] {campaign or '(blank)'}"
             entry = missing_funnels.setdefault(key, {
                 "count": 0,
                 "sample_lead_url": lead_url,
@@ -459,7 +483,17 @@ def main() -> int:
     sheets.append_conflicts(sheet, conflicts)
 
     stats["duration_sec"] = int(time.time() - start)
-    sheets.append_run_log(sheet, stats)
+
+    # Only append a run-log row when something meaningful happened: an
+    # actual write, a conflict that needs human review, or an error. Quiet
+    # runs (all "already set") don't add noise to the sheet. Errors and
+    # conflicts are kept because losing them silently is worse than noise.
+    if stats["leads_updated"] > 0 or stats["errors"] > 0 or stats["conflicts"] > 0:
+        sheets.append_run_log(sheet, stats)
+    else:
+        log.info(
+            "Quiet run (no updates, no conflicts, no errors); skipping run-log append"
+        )
 
     log.info(
         "=== Done in %ds | scanned=%d false_pos=%d processed=%d updated=%d "
