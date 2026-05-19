@@ -25,7 +25,12 @@ CLOSE_FIELDS = {
 SHEET_ID      = os.environ.get("MASTER_SHEET_ID", "")
 # Tabs to read for sheet-driven funnels. Each tab needs a 'Funnel Name'
 # column plus utm_source/medium/campaign/content. Order doesn't matter.
-SOURCE_TABS   = ["YouTube", "Webinar", "Meta", "VSL"]
+# NOTE: Webinar/Meta/VSL are intentionally NOT read — those tabs contain
+# rows describing TRAFFIC SOURCES for those funnels (e.g. utm_source=
+# 'instagram' mapped to 'VSL'), which would override our channel-level
+# mappings and cause spurious conflicts. They're handled by
+# SIMPLE_SOURCE_MAPPINGS below until we work out the disambiguation.
+SOURCE_TABS   = ["YouTube"]
 MISSING_TAB   = "_Missing Funnels"
 CONFLICTS_TAB = "_Conflicts"
 RUN_LOG_TAB   = "_Run Log"
@@ -72,12 +77,15 @@ INTEGRITY_FAIL_VALUES = {"#REF!", "#ERROR!", "#N/A", "Loading...", "#NAME?", "#V
 # Webinar/Meta/VSL/Paid) override these if the same key appears in both.
 # Keys MUST be lowercase. Values are the exact funnel name written to Close.
 SIMPLE_SOURCE_MAPPINGS = {
-    "instagram":  "Instagram",
-    "x":          "X",
-    "twitter":    "X",
-    "x-twitter":  "X",
-    "linkedin":   "Linkedin",
-    "li":         "Linkedin",
+    "instagram":        "Instagram",
+    "x":                "X",
+    "twitter":          "X",
+    "x-twitter":        "X",
+    "linkedin":         "Linkedin",
+    "li":               "Linkedin",
+    "internal-webinar": "Internal Webinar",
+    "meta":             "Meta Ads",
+    "newsletter":       "VSL",
 }
 
 # Some integrations stuff the entire UTM query string into the utm_source
@@ -85,9 +93,12 @@ SIMPLE_SOURCE_MAPPINGS = {
 # We classify these by the part before the first '&' or '?'. Applies to every
 # channel where we've observed the pattern.
 MALFORMED_SOURCE_PREFIXES = {
-    "youtube":   "YouTube",
-    "instagram": "Instagram",
-    "linkedin":  "Linkedin",
-    "twitter":   "X",
-    "x-twitter": "X",
+    "youtube":          "YouTube",
+    "instagram":        "Instagram",
+    "linkedin":         "Linkedin",
+    "twitter":          "X",
+    "x-twitter":        "X",
+    "internal-webinar": "Internal Webinar",
+    "meta":             "Meta Ads",
+    "newsletter":       "VSL",
 }
