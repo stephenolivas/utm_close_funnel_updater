@@ -20,6 +20,45 @@ def _local_now_iso() -> str:
     return datetime.now(LOCAL_TZ).isoformat(timespec="seconds")
 
 
+def _classify_source(value, source_map: dict[str, str]) -> str | None:
+    """Map a contact's raw utm_source value to a funnel name, or None if no
+    match. Combines:
+      - exact lookup against source_map (sheet + simple config mappings)
+      - prefix match against MALFORMED_SOURCE_PREFIXES (catches integrations
+        that stuff the full query string into utm_source)
+    """
+    if not value:
+        return None
+    v = matcher.normalize(value)
+    if not v:
+        return None
+    if v in source_map:
+        return source_map[v]
+    # Malformed-prefix fallback: e.g. "linkedin&utm_medium=..." → LinkedIn
+    for prefix, funnel in config.MALFORMED_SOURCE_PREFIXES.items():
+        if v.startswith(prefix + "&") or v.startswith(prefix + "?"):
+            return funnel
+    return None
+
+
+def _format_per_funnel(by_funnel: dict[str, dict[str, int]]) -> str:
+    """Render per-funnel stats as a multi-line string for the run log cell.
+    Sorted by funnel name for stable ordering across runs. Funnels with all
+    zeros are still shown so a glance reveals quiet channels too."""
+    if not by_funnel:
+        return ""
+    lines = []
+    for funnel in sorted(by_funnel):
+        s = by_funnel[funnel]
+        lines.append(
+            f"{funnel}: upd={s.get('updated', 0)} "
+            f"set={s.get('already_set', 0)} "
+            f"conf={s.get('conflicts', 0)} "
+            f"race={s.get('raced', 0)}"
+        )
+    return "\n".join(lines)
+
+
 # Python logging: timestamps in local timezone too, so log lines line up
 # with both the sheet timestamps and the GitHub Actions UI.
 class _LocalFormatter(logging.Formatter):
@@ -55,7 +94,16 @@ def main() -> int:
         "missing_campaigns":         0,
         "errors":                    0,
         "notes":                     "",
+        "per_funnel":                "",  # formatted breakdown for the run log cell
     }
+    # Per-funnel counters, populated as we encounter funnels. Rendered into
+    # stats["per_funnel"] right before the run log is written.
+    by_funnel: dict[str, dict[str, int]] = {}
+
+    def _bump(funnel: str, key: str) -> None:
+        by_funnel.setdefault(funnel, {
+            "updated": 0, "already_set": 0, "conflicts": 0, "raced": 0,
+        })[key] += 1
 
     # -------------------------------------------------------------------------
     # 1. Open sheet and read source tab (with integrity checks)
@@ -83,17 +131,24 @@ def main() -> int:
         return 1
 
     stats["source_rows"] = source_rows
-    log.info("Source map: %s", source_map)
+    sheet_source_map = source_map  # what the sheet returned (currently just YouTube)
+    sheet_driven_sources = set(sheet_source_map.keys())
 
-    if "youtube" not in source_map:
-        log.warning("No 'youtube' entry in source map — nothing to do this run")
-        stats["notes"] = "No youtube source mapping found in source tab"
+    # Combined source map = sheet entries + simple config entries.
+    # Sheet wins on key collision so Marketing can override config without a deploy.
+    combined_source_map: dict[str, str] = dict(config.SIMPLE_SOURCE_MAPPINGS)
+    combined_source_map.update(sheet_source_map)
+
+    log.info("Sheet-driven sources: %s", sorted(sheet_driven_sources))
+    log.info("Combined source map (%d entries): %s",
+             len(combined_source_map), combined_source_map)
+
+    if not combined_source_map:
+        log.warning("Source map is empty — nothing to do this run")
+        stats["notes"] = "Empty source map (no sheet entries and no config entries)"
         stats["duration_sec"] = int(time.time() - start)
         sheets.append_run_log(sheet, stats)
         return 0
-
-    target_funnel = source_map["youtube"]
-    log.info("Target funnel for utm_source=youtube: '%s'", target_funnel)
 
     # -------------------------------------------------------------------------
     # 2. Search Close for contacts with utm_source = youtube
@@ -131,11 +186,15 @@ def main() -> int:
     # string. We work around the 10k pagination ceiling by sorting newest-first
     # in close.search_contacts() and breaking out of the loop below as soon as
     # a contact older than LOOKBACK_DAYS appears.
-    query = f'custom.{utm_source_field}:"youtube"'
-    log.info("Close query: %s (sorted by -date_updated)", query)
+    search_terms = sorted(combined_source_map.keys())
+    query = " OR ".join(
+        f'custom.{utm_source_field}:"{term}"' for term in search_terms
+    )
+    log.info("Close query (%d source terms, sorted -date_updated): %s",
+             len(search_terms), query)
 
-    # Dedupe contacts by lead_id. Track false positives so we can see how
-    # noisy Close's search is.
+    # Dedupe contacts by lead_id. Each contact gets a "_funnel" attribute
+    # attached when classified so we know which funnel to write per lead.
     leads_to_process: dict[str, list[dict]] = defaultdict(list)
     sample_false_positives: list[tuple[str, str]] = []   # (contact_id, actual_utm_source)
 
@@ -152,21 +211,26 @@ def main() -> int:
                 )
                 break
 
-            # --- SAFETY CHECK ---
+            # --- CLASSIFY ---
             # Close's search returns false positives — contacts whose
-            # utm_source field is empty, stale, or unrelated. Before
-            # queueing the lead for update, confirm this contact's
-            # utm_source actually matches our source map.
-            actual_utm_source = matcher.normalize(c.get(f"custom.{utm_source_field}"))
-            if actual_utm_source not in source_map:
+            # utm_source field is empty, unrelated, or for a source we don't
+            # configure. The classifier returns None for those and we drop
+            # them. For known sources (including malformed-prefix variants),
+            # it returns the funnel name we'll write.
+            raw_utm_source = c.get(f"custom.{utm_source_field}")
+            funnel = _classify_source(raw_utm_source, combined_source_map)
+            if funnel is None:
                 stats["contacts_false_positive"] += 1
                 if len(sample_false_positives) < 5:
-                    sample_false_positives.append((c.get("id", ""), actual_utm_source or "(empty)"))
+                    sample_false_positives.append(
+                        (c.get("id", ""), str(raw_utm_source or "(empty)"))
+                    )
                 continue
 
             lead_id = c.get("lead_id")
             if not lead_id:
                 continue
+            c["_funnel"] = funnel
             leads_to_process[lead_id].append(c)
     except Exception as e:
         log.exception("Failed during contact search")
@@ -218,11 +282,29 @@ def main() -> int:
         stats["leads_processed"] += 1
         lead_url = f"https://app.close.com/lead/{lead_id}/"
 
+        # Target funnel = funnel from this lead's most-recently-updated
+        # matching contact. search_contacts returns newest-first, so
+        # contacts[0] is the most recent. If a lead has matches from
+        # multiple sources, most-recent wins — log if that happens so we
+        # have visibility into the edge case.
+        target_funnel = contacts[0]["_funnel"]
+        distinct_funnels = {c["_funnel"] for c in contacts}
+        if len(distinct_funnels) > 1:
+            log.info(
+                "Lead %s has contacts from multiple sources: %s — using "
+                "most-recent funnel '%s'",
+                lead_id, sorted(distinct_funnels), target_funnel,
+            )
+
+        # Tag every per-lead log line with the funnel so they can be filtered
+        # in the GitHub Actions log search (e.g. search for "[Instagram]").
+        ftag = f"[{target_funnel}]"
+
         # Fetch the lead to read its current Funnel Name
         try:
             lead = cli.get_lead(lead_id, ["id", "display_name", f"custom.{funnel_name_field}"])
         except Exception as e:
-            log.warning("Failed to fetch lead %s: %s", lead_id, e)
+            log.warning("%s Failed to fetch lead %s: %s", ftag, lead_id, e)
             stats["errors"] += 1
             continue
 
@@ -245,17 +327,18 @@ def main() -> int:
             # moment of decision in case the UI shows a value later.
             tag = "[DRY] Would update" if config.DRY_RUN else "Updating"
             log.info(
-                "%s lead %s '%s'\n"
+                "%s %s lead %s '%s'\n"
                 "  url:            %s\n"
                 "  current funnel: raw=%r (treated as empty)\n"
                 "  target funnel:  %r\n"
                 "  triggering contacts (%d):\n%s",
-                tag, lead_id, display_name, lead_url, raw_funnel_value,
+                ftag, tag, lead_id, display_name, lead_url, raw_funnel_value,
                 target_funnel, len(contacts), _format_contacts(contacts),
             )
 
             if config.DRY_RUN:
                 stats["leads_updated"] += 1
+                _bump(target_funnel, "updated")
             else:
                 # Race-protection: re-fetch immediately before write. If the
                 # Zap (or anything else) populated the field between our two
@@ -265,7 +348,7 @@ def main() -> int:
                         lead_id, ["id", f"custom.{funnel_name_field}"],
                     )
                 except Exception as e:
-                    log.warning("Failed to re-fetch lead %s before write: %s", lead_id, e)
+                    log.warning("%s Failed to re-fetch lead %s before write: %s", ftag, lead_id, e)
                     stats["errors"] += 1
                     continue
 
@@ -274,20 +357,22 @@ def main() -> int:
 
                 if recheck_funnel == target_funnel:
                     log.info(
-                        "Race detected on lead %s — funnel populated to '%s' between reads "
-                        "(raw=%r); skipping write (url=%s)",
-                        lead_id, recheck_funnel, recheck_raw, lead_url,
+                        "%s Race detected on lead %s — funnel populated to '%s' between reads "
+                        "(raw=%r); skipping write. url: %s",
+                        ftag, lead_id, recheck_funnel, recheck_raw, lead_url,
                     )
                     stats["leads_raced"] += 1
+                    _bump(target_funnel, "raced")
                     continue
 
                 if recheck_funnel and recheck_funnel != target_funnel:
                     log.info(
-                        "Race-to-conflict on lead %s — funnel changed to '%s' between reads "
-                        "(raw=%r); recording as conflict (url=%s)",
-                        lead_id, recheck_funnel, recheck_raw, lead_url,
+                        "%s Race-to-conflict on lead %s — funnel changed to '%s' between reads "
+                        "(raw=%r); recording as conflict. url: %s",
+                        ftag, lead_id, recheck_funnel, recheck_raw, lead_url,
                     )
                     stats["conflicts"] += 1
+                    _bump(target_funnel, "conflicts")
                     c = contacts[0]
                     conflicts.append({
                         "lead_id":               lead_id,
@@ -305,23 +390,26 @@ def main() -> int:
                         f"custom.{funnel_name_field}": target_funnel,
                     })
                     log.info(
-                        "  → wrote: lead %s funnel set to '%s' (was raw=%r)",
-                        lead_id, target_funnel, recheck_raw,
+                        "%s   → wrote: lead %s funnel set to '%s' (was raw=%r)",
+                        ftag, lead_id, target_funnel, recheck_raw,
                     )
                     stats["leads_updated"] += 1
+                    _bump(target_funnel, "updated")
                 except Exception as e:
-                    log.warning("Failed to update lead %s: %s", lead_id, e)
+                    log.warning("%s Failed to update lead %s: %s", ftag, lead_id, e)
                     stats["errors"] += 1
         elif action == "skip_already_set":
             stats["leads_skipped_already_set"] += 1
-            # One-line audit so the user can spot-check every YouTube lead in
+            _bump(target_funnel, "already_set")
+            # One-line audit so the user can spot-check every matching lead in
             # the window, not just the ones that need writes.
             log.info(
-                "Already set: lead %s '%s' — funnel=%r (url=%s)",
-                lead_id, display_name, current_funnel, lead_url,
+                "%s Already set: lead %s '%s' — funnel=%r — url: %s",
+                ftag, lead_id, display_name, current_funnel, lead_url,
             )
         elif action == "conflict":
             stats["conflicts"] += 1
+            _bump(target_funnel, "conflicts")
             c = contacts[0]
             conflicts.append({
                 "lead_id":               lead_id,
@@ -333,17 +421,22 @@ def main() -> int:
                 "utm_campaign":          c.get(f"custom.{utm_campaign_field}", ""),
             })
             log.info(
-                "Conflict on lead %s '%s'\n"
+                "%s Conflict on lead %s '%s'\n"
                 "  url:             %s\n"
                 "  current funnel:  %r  ← NOT overwriting\n"
                 "  attempted funnel: %r\n"
                 "  triggering contacts (%d):\n%s",
-                lead_id, display_name, lead_url, current_funnel,
+                ftag, lead_id, display_name, lead_url, current_funnel,
                 target_funnel, len(contacts), _format_contacts(contacts),
             )
 
-        # --- Check B: campaign monitoring (independent of write) ---
+        # --- Check B: campaign monitoring (only for sheet-driven sources) ---
+        # Simple config-driven channels (Instagram, X, LinkedIn) have no
+        # known-campaigns list, so we don't track missing campaigns for them.
         for c in contacts:
+            actual_src = matcher.normalize(c.get(f"custom.{utm_source_field}"))
+            if actual_src not in sheet_driven_sources:
+                continue
             campaign = str(c.get(f"custom.{utm_campaign_field}") or "").strip()
             if campaign and campaign in known_campaigns:
                 continue
@@ -355,6 +448,7 @@ def main() -> int:
             entry["count"] += 1
 
     stats["missing_campaigns"] = len(missing_funnels)
+    stats["per_funnel"] = _format_per_funnel(by_funnel)
 
     # -------------------------------------------------------------------------
     # 4. Write reports
@@ -381,6 +475,8 @@ def main() -> int:
         stats["missing_campaigns"],
         stats["errors"],
     )
+    if stats["per_funnel"]:
+        log.info("Per-funnel breakdown:\n%s", stats["per_funnel"])
     return 0
 
 
