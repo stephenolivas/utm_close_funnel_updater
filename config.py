@@ -56,3 +56,31 @@ TIMEZONE = os.environ.get("REPORT_TIMEZONE", "America/Los_Angeles")
 
 # Cell values that indicate the sheet didn't load properly.
 INTEGRITY_FAIL_VALUES = {"#REF!", "#ERROR!", "#N/A", "Loading...", "#NAME?", "#VALUE!"}
+
+# -----------------------------------------------------------------------------
+# Simple source → funnel mappings (channels without per-campaign rules)
+# -----------------------------------------------------------------------------
+# For channels where every contact with this utm_source should get the same
+# funnel name regardless of campaign. Sheet-driven channels (YouTube, later
+# Webinar/Meta/VSL/Paid) override these if the same key appears in both.
+# Keys MUST be lowercase. Values are the exact funnel name written to Close.
+SIMPLE_SOURCE_MAPPINGS = {
+    "instagram":  "Instagram",
+    "x":          "X",
+    "twitter":    "X",
+    "x-twitter":  "X",
+    "linkedin":   "LinkedIn",
+    "li":         "LinkedIn",
+}
+
+# Some integrations stuff the entire UTM query string into the utm_source
+# field, e.g. "linkedin&utm_medium=Kara&utm_campaign=vp_setter&...".
+# We classify these by the part before the first '&' or '?'. Applies to every
+# channel where we've observed the pattern.
+MALFORMED_SOURCE_PREFIXES = {
+    "youtube":   "YouTube",
+    "instagram": "Instagram",
+    "linkedin":  "LinkedIn",
+    "twitter":   "X",
+    "x-twitter": "X",
+}
