@@ -1,8 +1,8 @@
-name: Close Funnel Sync — YouTube
+name: Close Funnel Sync
 
 on:
   schedule:
-    # Hourly, on the hour, UTC.
+    # Every hour, on the hour, UTC.
     - cron: '0 * * * *'
   workflow_dispatch:
     inputs:
