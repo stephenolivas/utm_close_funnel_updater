@@ -23,17 +23,24 @@ CLOSE_FIELDS = {
 # Master sheet config
 # -----------------------------------------------------------------------------
 SHEET_ID      = os.environ.get("MASTER_SHEET_ID", "")
-SOURCE_TAB    = "YouTube"            # v1: only YouTube
+# Tabs to read for sheet-driven funnels. Each tab needs a 'Funnel Name'
+# column plus utm_source/medium/campaign/content. Order doesn't matter.
+SOURCE_TABS   = ["YouTube", "Webinar", "Meta", "VSL"]
 MISSING_TAB   = "_Missing Funnels"
 CONFLICTS_TAB = "_Conflicts"
 RUN_LOG_TAB   = "_Run Log"
 
-# The column header in the source tab that carries the funnel name to write
-# to Close. Change this in one place if Marketing renames the column.
-FUNNEL_NAME_HEADER = "Funnel Name for Close"
+# The column header in the source tabs that carries the funnel name to write
+# to Close. The fallback exists so we don't break if the YouTube tab still
+# uses the old longer header name — remove the fallback once all tabs are
+# renamed.
+FUNNEL_NAME_HEADER          = "Funnel Name"
+FUNNEL_NAME_HEADER_FALLBACK = "Funnel Name for Close"
 
-# Required column headers in the source tab. Script aborts if any are missing.
-REQUIRED_HEADERS = ["utm_source", "utm_medium", "utm_campaign", "utm_content", FUNNEL_NAME_HEADER]
+# Required column headers in every source tab. Script aborts on any tab
+# missing these. Both FUNNEL_NAME_HEADER variants are acceptable; the read
+# code picks whichever is present.
+REQUIRED_HEADERS = ["utm_source", "utm_medium", "utm_campaign", "utm_content"]
 
 # -----------------------------------------------------------------------------
 # Behavior
@@ -69,8 +76,8 @@ SIMPLE_SOURCE_MAPPINGS = {
     "x":          "X",
     "twitter":    "X",
     "x-twitter":  "X",
-    "linkedin":   "LinkedIn",
-    "li":         "LinkedIn",
+    "linkedin":   "Linkedin",
+    "li":         "Linkedin",
 }
 
 # Some integrations stuff the entire UTM query string into the utm_source
@@ -80,7 +87,7 @@ SIMPLE_SOURCE_MAPPINGS = {
 MALFORMED_SOURCE_PREFIXES = {
     "youtube":   "YouTube",
     "instagram": "Instagram",
-    "linkedin":  "LinkedIn",
+    "linkedin":  "Linkedin",
     "twitter":   "X",
     "x-twitter": "X",
 }
