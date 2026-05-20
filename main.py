@@ -56,6 +56,14 @@ def _format_per_funnel(by_funnel: dict[str, dict[str, int]]) -> str:
     return "\n".join(lines)
 
 
+# ANSI color codes for GitHub Actions log output. GitHub renders these
+# inline, making it easy to skim the log for lines that represent actual
+# writes. Used only on the live "wrote" confirmation lines so they stand
+# out against the wall of "Already set" / dry-run / processing chatter.
+_GREEN = "\033[1;92m"   # bold bright green
+_RESET = "\033[0m"
+
+
 # Python logging: timestamps in local timezone too, so log lines line up
 # with both the sheet timestamps and the GitHub Actions UI.
 class _LocalFormatter(logging.Formatter):
@@ -409,7 +417,7 @@ def main() -> int:
                         f"custom.{funnel_name_field}": target_funnel,
                     })
                     log.info(
-                        "%s   → wrote: lead %s funnel set to '%s' (was raw=%r)",
+                        f"{_GREEN}%s   → wrote: lead %s funnel set to '%s' (was raw=%r){_RESET}",
                         ftag, lead_id, target_funnel, recheck_raw,
                     )
                     stats["leads_updated"] += 1
