@@ -64,6 +64,27 @@ _GREEN = "\033[1;92m"   # bold bright green
 _RESET = "\033[0m"
 
 
+def _decide_action(current_funnel: str, target_funnel: str) -> str:
+    """Return one of: 'write', 'skip_already_set', 'overwrite', 'conflict'.
+
+    Centralized so initial read and race re-fetch use the same logic.
+    Policy:
+      - empty current             → write
+      - current == target         → skip_already_set
+      - current is overridable
+        AND target may overwrite  → overwrite
+      - otherwise                 → conflict (fill-only protection)
+    """
+    if not current_funnel:
+        return "write"
+    if current_funnel == target_funnel:
+        return "skip_already_set"
+    if (current_funnel in config.OVERRIDABLE_CURRENT_FUNNELS
+            and target_funnel not in config.NON_OVERRIDING_TARGET_FUNNELS):
+        return "overwrite"
+    return "conflict"
+
+
 # Python logging: timestamps in local timezone too, so log lines line up
 # with both the sheet timestamps and the GitHub Actions UI.
 class _LocalFormatter(logging.Formatter):
@@ -93,6 +114,7 @@ def main() -> int:
         "contacts_false_positive":   0,   # Close returned them, but utm_source wasn't actually a match
         "leads_processed":           0,
         "leads_updated":             0,
+        "leads_overwritten":         0,   # subset of leads_updated where we replaced an OVERRIDABLE current value
         "leads_skipped_already_set": 0,
         "leads_raced":               0,   # Zap (or other integration) populated the field between our two reads
         "conflicts":                 0,
@@ -340,36 +362,43 @@ def main() -> int:
         raw_funnel_value = lead.get(f"custom.{funnel_name_field}")
 
         # --- Check A: write decision based on utm_source ---
-        if not current_funnel:
-            action = "write"
-        elif current_funnel == target_funnel:
-            action = "skip_already_set"
-        else:
-            action = "conflict"
+        action = _decide_action(current_funnel, target_funnel)
 
-        if action == "write":
-            # Verbose decision log: full context so each "would update" can be
+        if action in ("write", "overwrite"):
+            # Verbose decision log: full context so each pending update can be
             # spot-checked without re-querying Close. The funnel field is also
             # written by a flaky Zap; this evidence proves what we saw at the
             # moment of decision in case the UI shows a value later.
+            if action == "overwrite":
+                overwrite_note = f" (OVERWRITING current funnel: {current_funnel!r})"
+                current_funnel_desc = f"raw={raw_funnel_value!r} (in OVERRIDABLE_CURRENT_FUNNELS — will be replaced)"
+            else:
+                overwrite_note = ""
+                current_funnel_desc = f"raw={raw_funnel_value!r} (treated as empty)"
+
             tag = "[DRY] Would update" if config.DRY_RUN else "Updating"
             log.info(
-                "%s %s lead %s '%s'\n"
+                "%s %s lead %s '%s'%s\n"
                 "  url:            %s\n"
-                "  current funnel: raw=%r (treated as empty)\n"
+                "  current funnel: %s\n"
                 "  target funnel:  %r\n"
                 "  triggering contacts (%d):\n%s",
-                ftag, tag, lead_id, display_name, lead_url, raw_funnel_value,
-                target_funnel, len(contacts), _format_contacts(contacts),
+                ftag, tag, lead_id, display_name, overwrite_note, lead_url,
+                current_funnel_desc, target_funnel, len(contacts),
+                _format_contacts(contacts),
             )
 
             if config.DRY_RUN:
                 stats["leads_updated"] += 1
                 _bump(target_funnel, "updated")
+                if action == "overwrite":
+                    stats["leads_overwritten"] += 1
             else:
-                # Race-protection: re-fetch immediately before write. If the
-                # Zap (or anything else) populated the field between our two
-                # reads, don't redundantly overwrite.
+                # Race-protection: re-fetch immediately before write. Use
+                # _decide_action to re-evaluate against whatever the field
+                # contains NOW — handles cases where another integration
+                # cleared it, set it to our target, or set it to something
+                # we shouldn't overwrite.
                 try:
                     lead_recheck = cli.get_lead(
                         lead_id, ["id", f"custom.{funnel_name_field}"],
@@ -381,8 +410,9 @@ def main() -> int:
 
                 recheck_raw = lead_recheck.get(f"custom.{funnel_name_field}")
                 recheck_funnel = str(recheck_raw or "").strip()
+                recheck_action = _decide_action(recheck_funnel, target_funnel)
 
-                if recheck_funnel == target_funnel:
+                if recheck_action == "skip_already_set":
                     log.info(
                         "%s Race detected on lead %s — funnel populated to '%s' between reads "
                         "(raw=%r); skipping write. url: %s",
@@ -392,7 +422,7 @@ def main() -> int:
                     _bump(target_funnel, "raced")
                     continue
 
-                if recheck_funnel and recheck_funnel != target_funnel:
+                if recheck_action == "conflict":
                     log.info(
                         "%s Race-to-conflict on lead %s — funnel changed to '%s' between reads "
                         "(raw=%r); recording as conflict. url: %s",
@@ -412,16 +442,20 @@ def main() -> int:
                     })
                     continue
 
+                # recheck_action is "write" or "overwrite" — proceed with PUT
                 try:
                     cli.update_lead(lead_id, {
                         f"custom.{funnel_name_field}": target_funnel,
                     })
+                    overwrite_marker = " [OVERWRITE]" if recheck_action == "overwrite" else ""
                     log.info(
-                        f"{_GREEN}%s   → wrote: lead %s funnel set to '%s' (was raw=%r){_RESET}",
+                        f"{_GREEN}%s   → wrote: lead %s funnel set to '%s' (was raw=%r){overwrite_marker}{_RESET}",
                         ftag, lead_id, target_funnel, recheck_raw,
                     )
                     stats["leads_updated"] += 1
                     _bump(target_funnel, "updated")
+                    if recheck_action == "overwrite":
+                        stats["leads_overwritten"] += 1
                 except Exception as e:
                     log.warning("%s Failed to update lead %s: %s", ftag, lead_id, e)
                     stats["errors"] += 1
@@ -505,12 +539,14 @@ def main() -> int:
 
     log.info(
         "=== Done in %ds | scanned=%d false_pos=%d processed=%d updated=%d "
-        "already_set=%d raced=%d conflicts=%d missing=%d errors=%d ===",
+        "(of which overwrites=%d) already_set=%d raced=%d conflicts=%d "
+        "missing=%d errors=%d ===",
         stats["duration_sec"],
         stats["contacts_scanned"],
         stats["contacts_false_positive"],
         stats["leads_processed"],
         stats["leads_updated"],
+        stats["leads_overwritten"],
         stats["leads_skipped_already_set"],
         stats["leads_raced"],
         stats["conflicts"],
