@@ -2,8 +2,8 @@ name: Close Funnel Sync
 
 on:
   schedule:
-    # Every hour, on the hour, UTC.
-    - cron: '0 * * * *'
+    # Every 2 hours, on the hour, UTC.
+    - cron: '0 */2 * * *'
   workflow_dispatch:
     inputs:
       dry_run:
