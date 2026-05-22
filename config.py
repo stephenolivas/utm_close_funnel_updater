@@ -102,3 +102,30 @@ MALFORMED_SOURCE_PREFIXES = {
     "meta":             "Meta Ads",
     "newsletter":       "VSL",
 }
+
+# -----------------------------------------------------------------------------
+# Overwrite policy
+# -----------------------------------------------------------------------------
+# Normally the script is fill-only: if the funnel field is already set we
+# don't overwrite, we log a conflict. The two sets below introduce a narrow
+# exception:
+#
+#   - If the lead's CURRENT funnel is in OVERRIDABLE_CURRENT_FUNNELS, we
+#     are willing to overwrite it...
+#   - ...UNLESS the funnel we're about to WRITE is in
+#     NON_OVERRIDING_TARGET_FUNNELS, in which case it's treated as a
+#     conflict (these are weak/ambient attribution signals that shouldn't
+#     stomp on stronger ones).
+#
+# Exact string match, case-sensitive. Add / remove freely.
+OVERRIDABLE_CURRENT_FUNNELS = {
+    "Reactivation Email",
+}
+
+NON_OVERRIDING_TARGET_FUNNELS = {
+    "Instagram",
+    "Linkedin",
+    "X",
+    "Low Ticket Funnel",
+    "LTF - Quiz Funnel",
+}
