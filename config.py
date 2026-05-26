@@ -123,9 +123,6 @@ OVERRIDABLE_CURRENT_FUNNELS = {
 }
 
 NON_OVERRIDING_TARGET_FUNNELS = {
-    "Instagram",
-    "Linkedin",
-    "X",
     "Low Ticket Funnel",
     "LTF - Quiz Funnel",
 }
