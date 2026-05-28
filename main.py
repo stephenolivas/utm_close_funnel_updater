@@ -20,9 +20,11 @@ def _local_now_iso() -> str:
     return datetime.now(LOCAL_TZ).isoformat(timespec="seconds")
 
 
-def _classify_source(value, source_map: dict[str, str]) -> str | None:
+def _classify_source(value, medium_value, source_map: dict[str, str]) -> str | None:
     """Map a contact's raw utm_source value to a funnel name, or None if no
     match. Combines:
+      - source+medium override (SOURCE_MEDIUM_OVERRIDES) — checked first;
+        used to distinguish owned vs agency-managed channels
       - exact lookup against source_map (sheet + simple config mappings)
       - prefix match against MALFORMED_SOURCE_PREFIXES (catches integrations
         that stuff the full query string into utm_source)
@@ -32,6 +34,12 @@ def _classify_source(value, source_map: dict[str, str]) -> str | None:
     v = matcher.normalize(value)
     if not v:
         return None
+    # Source + medium override (e.g. instagram + organic-social → Anthony IG)
+    if v in config.SOURCE_MEDIUM_OVERRIDES:
+        med = matcher.normalize(medium_value or "")
+        override = config.SOURCE_MEDIUM_OVERRIDES[v].get(med)
+        if override:
+            return override
     if v in source_map:
         return source_map[v]
     # Malformed-prefix fallback: e.g. "linkedin&utm_medium=..." → LinkedIn
@@ -267,7 +275,8 @@ def main() -> int:
             # them. For known sources (including malformed-prefix variants),
             # it returns the funnel name we'll write.
             raw_utm_source = c.get(f"custom.{utm_source_field}")
-            funnel = _classify_source(raw_utm_source, combined_source_map)
+            raw_utm_medium = c.get(f"custom.{utm_medium_field}")
+            funnel = _classify_source(raw_utm_source, raw_utm_medium, combined_source_map)
             if funnel is None:
                 stats["contacts_false_positive"] += 1
                 if len(sample_false_positives) < 5:
