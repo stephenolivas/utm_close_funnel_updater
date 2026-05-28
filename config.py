@@ -86,6 +86,7 @@ SIMPLE_SOURCE_MAPPINGS = {
     "internal-webinar": "Internal Webinar",
     "meta":             "Meta Ads",
     "newsletter":       "VSL",
+    "tiktok":           "TikTok",
 }
 
 # Some integrations stuff the entire UTM query string into the utm_source
@@ -101,6 +102,22 @@ MALFORMED_SOURCE_PREFIXES = {
     "internal-webinar": "Internal Webinar",
     "meta":             "Meta Ads",
     "newsletter":       "VSL",
+    "tiktok":           "TikTok",
+}
+
+# -----------------------------------------------------------------------------
+# Source + medium overrides
+# -----------------------------------------------------------------------------
+# Some channels split into "owned" vs "agency-managed" based on utm_medium.
+# If a contact's utm_source matches an outer key AND utm_medium matches an
+# inner key, the inner value wins over SIMPLE_SOURCE_MAPPINGS. Falls back to
+# the regular source mapping if no medium override matches.
+#
+# Both keys are case-insensitive (normalized to lowercase + stripped).
+SOURCE_MEDIUM_OVERRIDES = {
+    "instagram": {
+        "organic-social": "Anthony IG",
+    },
 }
 
 # -----------------------------------------------------------------------------
