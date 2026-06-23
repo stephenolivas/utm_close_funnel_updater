@@ -87,6 +87,9 @@ SIMPLE_SOURCE_MAPPINGS = {
     "meta":             "Meta Ads",
     "newsletter":       "VSL",
     "tiktok":           "TikTok",
+    "ak-ig":            "Anthony IG",
+    "anthony-x":        "Anthony X",
+    "anthony-li":       "Anthony LinkedIn",
 }
 
 # Some integrations stuff the entire UTM query string into the utm_source
@@ -103,6 +106,9 @@ MALFORMED_SOURCE_PREFIXES = {
     "meta":             "Meta Ads",
     "newsletter":       "VSL",
     "tiktok":           "TikTok",
+    "ak-ig":            "Anthony IG",
+    "anthony-x":        "Anthony X",
+    "anthony-li":       "Anthony LinkedIn",
 }
 
 # -----------------------------------------------------------------------------
