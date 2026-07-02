@@ -90,6 +90,7 @@ SIMPLE_SOURCE_MAPPINGS = {
     "ak-ig":            "Anthony IG",
     "anthony-x":        "Anthony X",
     "anthony-li":       "Anthony LinkedIn",
+    "ltf":              "LTF - In-House",
 }
 
 # Some integrations stuff the entire UTM query string into the utm_source
@@ -109,6 +110,7 @@ MALFORMED_SOURCE_PREFIXES = {
     "ak-ig":            "Anthony IG",
     "anthony-x":        "Anthony X",
     "anthony-li":       "Anthony LinkedIn",
+    "ltf":              "LTF - In-House",
 }
 
 # -----------------------------------------------------------------------------
@@ -148,4 +150,18 @@ OVERRIDABLE_CURRENT_FUNNELS = {
 NON_OVERRIDING_TARGET_FUNNELS = {
     "Low Ticket Funnel",
     "LTF - Quiz Funnel",
+}
+
+# -----------------------------------------------------------------------------
+# Direct funnel rewrites
+# -----------------------------------------------------------------------------
+# {current_funnel: target_funnel}
+# Any lead whose current funnel matches a KEY gets its funnel updated to the
+# VALUE, regardless of utm_source. Runs as its own pass BEFORE the utm_source
+# scan, so a rewritten lead already has its new value by the time contact
+# processing starts. Use for consolidation / renaming / retiring old funnels.
+#
+# Exact string match, case-sensitive.
+FUNNEL_REWRITES = {
+    "Low Ticket Funnel": "LTF - In-House",
 }
