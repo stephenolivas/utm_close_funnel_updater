@@ -200,17 +200,16 @@ def main() -> int:
     log.info("Combined source map (%d entries): %s",
              len(combined_source_map), combined_source_map)
 
-    if not combined_source_map:
-        log.warning("Source map is empty — nothing to do this run")
-        stats["notes"] = "Empty source map (no sheet entries and no config entries)"
+    if not combined_source_map and not config.FUNNEL_REWRITES:
+        log.warning("Source map is empty AND no rewrites configured — nothing to do this run")
+        stats["notes"] = "Empty source map, no rewrites"
         stats["duration_sec"] = int(time.time() - start)
         sheets.append_run_log(sheet, stats)
         return 0
 
     # -------------------------------------------------------------------------
-    # 2. Search Close for contacts with utm_source = youtube
+    # Close client init (used by both the rewrite pass and the utm_source pass)
     # -------------------------------------------------------------------------
-    log.info("=== Step 2: Searching Close contacts ===")
     api_key = os.environ.get("CLOSE_API_KEY")
     if not api_key:
         log.error("CLOSE_API_KEY env var not set")
@@ -221,12 +220,144 @@ def main() -> int:
         return 1
 
     cli = close.CloseClient(api_key)
+    funnel_name_field  = config.CLOSE_FIELDS["lead"]["funnel_name"]
+
+    # -------------------------------------------------------------------------
+    # 2. Funnel rewrite pass (direct current-funnel → target-funnel migrations)
+    # -------------------------------------------------------------------------
+    # Independent of utm_source. For each rule in FUNNEL_REWRITES, we search
+    # Close for leads whose current funnel matches the source and rewrite to
+    # the target. Runs BEFORE the utm_source pass so rewritten leads are
+    # already in their new state by the time contact processing starts —
+    # avoids false-alarm conflicts.
+    if config.FUNNEL_REWRITES:
+        log.info("=== Step 2: Funnel rewrite pass ===")
+        for source_funnel, target_funnel in config.FUNNEL_REWRITES.items():
+            if not source_funnel or not target_funnel:
+                log.warning("Skipping empty rewrite rule: %r → %r", source_funnel, target_funnel)
+                continue
+            if source_funnel == target_funnel:
+                log.warning("Skipping no-op rewrite rule (source == target): %r", source_funnel)
+                continue
+
+            ftag = f"[{target_funnel}]"
+            query = f'custom.{funnel_name_field}:"{source_funnel}"'
+            log.info("%s Searching leads where current funnel = %r", ftag, source_funnel)
+
+            rw_scanned = 0
+            rw_verified = 0
+            rw_written = 0
+            rw_raced = 0
+            rw_errored = 0
+
+            try:
+                for lead in cli.search_leads(
+                    query,
+                    ["id", "display_name", "date_updated", f"custom.{funnel_name_field}"],
+                ):
+                    rw_scanned += 1
+
+                    # Age check: leads are sorted by date_updated DESC, so
+                    # once we see anything older than LOOKBACK_DAYS we can
+                    # stop — we're only processing recent activity, not
+                    # backfilling history.
+                    date_updated = lead.get("date_updated")
+                    if not matcher.is_recent(date_updated, config.LOOKBACK_DAYS):
+                        log.info(
+                            "%s Hit lookback cutoff at lead %s (date_updated=%s) "
+                            "after scanning %d leads — stopping rewrite pass for %r",
+                            ftag, lead.get("id"), date_updated, rw_scanned, source_funnel,
+                        )
+                        break
+
+                    # Verify against fuzzy-search false positives
+                    current = str(lead.get(f"custom.{funnel_name_field}") or "").strip()
+                    if current != source_funnel:
+                        continue
+                    rw_verified += 1
+
+                    lead_id = lead.get("id")
+                    display_name = lead.get("display_name") or "(no name)"
+                    lead_url = f"https://app.close.com/lead/{lead_id}/"
+
+                    tag = "[DRY] Would rewrite" if config.DRY_RUN else "Rewriting"
+                    log.info(
+                        "%s %s lead %s '%s': %r → %r — url: %s",
+                        ftag, tag, lead_id, display_name,
+                        source_funnel, target_funnel, lead_url,
+                    )
+
+                    if config.DRY_RUN:
+                        rw_written += 1
+                        stats["leads_updated"] += 1
+                        stats["leads_overwritten"] += 1
+                        _bump(target_funnel, "updated")
+                        continue
+
+                    # Race protection: re-fetch immediately before write.
+                    try:
+                        lead_recheck = cli.get_lead(
+                            lead_id, ["id", f"custom.{funnel_name_field}"],
+                        )
+                    except Exception as e:
+                        log.warning("%s Failed to re-fetch lead %s before rewrite: %s",
+                                    ftag, lead_id, e)
+                        rw_errored += 1
+                        stats["errors"] += 1
+                        continue
+
+                    recheck = str(lead_recheck.get(f"custom.{funnel_name_field}") or "").strip()
+                    if recheck != source_funnel:
+                        log.info(
+                            "%s Race detected on rewrite of lead %s — funnel changed to %r "
+                            "between reads; skipping. url: %s",
+                            ftag, lead_id, recheck, lead_url,
+                        )
+                        rw_raced += 1
+                        stats["leads_raced"] += 1
+                        _bump(target_funnel, "raced")
+                        continue
+
+                    try:
+                        cli.update_lead(lead_id, {
+                            f"custom.{funnel_name_field}": target_funnel,
+                        })
+                        log.info(
+                            f"{_GREEN}%s   → wrote: lead %s funnel set to '%s' "
+                            f"(was %r) [REWRITE]{_RESET}",
+                            ftag, lead_id, target_funnel, source_funnel,
+                        )
+                        rw_written += 1
+                        stats["leads_updated"] += 1
+                        stats["leads_overwritten"] += 1
+                        _bump(target_funnel, "updated")
+                    except Exception as e:
+                        log.warning("%s Failed to update lead %s: %s", ftag, lead_id, e)
+                        rw_errored += 1
+                        stats["errors"] += 1
+            except Exception:
+                log.exception(
+                    "%s Unexpected error during rewrite pass for %r",
+                    ftag, source_funnel,
+                )
+                stats["errors"] += 1
+
+            log.info(
+                "%s Rewrite %r → %r summary: scanned=%d verified=%d "
+                "wrote=%d raced=%d errored=%d",
+                ftag, source_funnel, target_funnel,
+                rw_scanned, rw_verified, rw_written, rw_raced, rw_errored,
+            )
+
+    # -------------------------------------------------------------------------
+    # 3. Search Close for contacts by utm_source
+    # -------------------------------------------------------------------------
+    log.info("=== Step 3: Searching Close contacts ===")
 
     utm_source_field   = config.CLOSE_FIELDS["contact"]["utm_source"]
     utm_medium_field   = config.CLOSE_FIELDS["contact"]["utm_medium"]
     utm_campaign_field = config.CLOSE_FIELDS["contact"]["utm_campaign"]
     utm_content_field  = config.CLOSE_FIELDS["contact"]["utm_content"]
-    funnel_name_field  = config.CLOSE_FIELDS["lead"]["funnel_name"]
 
     contact_fields = [
         "id",
@@ -316,9 +447,9 @@ def main() -> int:
     )
 
     # -------------------------------------------------------------------------
-    # 3. Process each lead
+    # 4. Process each lead
     # -------------------------------------------------------------------------
-    log.info("=== Step 3: Processing leads ===")
+    log.info("=== Step 4: Processing leads ===")
     missing_funnels: dict[str, dict] = {}
     conflicts: list[dict] = []
 
@@ -526,9 +657,9 @@ def main() -> int:
     stats["per_funnel"] = _format_per_funnel(by_funnel)
 
     # -------------------------------------------------------------------------
-    # 4. Write reports
+    # 5. Write reports
     # -------------------------------------------------------------------------
-    log.info("=== Step 4: Writing reports ===")
+    log.info("=== Step 5: Writing reports ===")
     # Always call update_missing_funnels — passing {} clears resolved campaigns.
     sheets.update_missing_funnels(sheet, missing_funnels)
     sheets.append_conflicts(sheet, conflicts)
