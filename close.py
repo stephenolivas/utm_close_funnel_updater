@@ -103,6 +103,34 @@ class CloseClient:
             skip += 100
 
     # -------------------------------------------------------------------------
+    # Lead search (paginated, generator)
+    # -------------------------------------------------------------------------
+    def search_leads(self, query: str, fields: list[str]) -> Iterator[dict]:
+        """Yield every lead matching `query`, paging in batches of 100.
+
+        Ordered by date_updated DESCENDING so callers can early-terminate on
+        age if desired. Skip-based pagination is capped at ~10k on Close's
+        side; callers processing a full population should be aware.
+        """
+        skip = 0
+        while True:
+            data = self._request("GET", "/lead/", params={
+                "query":     query,
+                "_skip":     skip,
+                "_limit":    100,
+                "_fields":   ",".join(fields),
+                "_order_by": "-date_updated",
+            })
+            batch = data.get("data", [])
+            if not batch:
+                return
+            for lead in batch:
+                yield lead
+            if not data.get("has_more"):
+                return
+            skip += 100
+
+    # -------------------------------------------------------------------------
     # Lead read / update
     # -------------------------------------------------------------------------
     def get_lead(self, lead_id: str, fields: list[str]) -> dict:
