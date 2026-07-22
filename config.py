@@ -89,8 +89,12 @@ SIMPLE_SOURCE_MAPPINGS = {
     "tiktok":           "TikTok",
     "ak-ig":            "Anthony IG",
     "anthony-x":        "Anthony X",
-    "anthony-li":       "Anthony LinkedIn",
+    "anthony-li":       "Linkedin",
     "ltf":              "LTF - In-House",
+    "mike-ig":          "Instagram",
+    "mike instagram":   "Instagram",
+    "mike li":          "Linkedin",
+    "mike-x":           "X",
 }
 
 # Some integrations stuff the entire UTM query string into the utm_source
@@ -109,8 +113,12 @@ MALFORMED_SOURCE_PREFIXES = {
     "tiktok":           "TikTok",
     "ak-ig":            "Anthony IG",
     "anthony-x":        "Anthony X",
-    "anthony-li":       "Anthony LinkedIn",
+    "anthony-li":       "Linkedin",
     "ltf":              "LTF - In-House",
+    "mike-ig":          "Instagram",
+    "mike instagram":   "Instagram",
+    "mike li":          "Linkedin",
+    "mike-x":           "X",
 }
 
 # -----------------------------------------------------------------------------
